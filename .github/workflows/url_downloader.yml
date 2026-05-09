@@ -1,40 +1,39 @@
-```yaml
-name: دانلودر لینک مستقیم
+name: "دانلودر لینک مستقیم"
 
 on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'Direct File URL'
+        description: "Direct File URL"
         required: true
         type: string
 
       zip_password:
-        description: 'Password for archive (leave empty for no password)'
+        description: "Password for archive (leave empty for no password)"
         required: false
+        default: ""
         type: string
-        default: ''
 
       max_part_mb:
-        description: 'Maximum size per part (MB) - 0 = auto (1800MB)'
+        description: "Maximum size per part (MB)"
         required: false
+        default: "1800"
         type: string
-        default: '1800'
 
       upload_method:
-        description: '📤 Upload Method'
+        description: "Upload Method"
         required: true
+        default: "repository"
         type: choice
         options:
-          - repository (push to repo)
-          - release (GitHub Releases)
-        default: 'repository (push to repo)'
+          - repository
+          - release
 
       release_tag:
-        description: '🏷️ Release Tag Name (only for Release method)'
+        description: "Release Tag"
         required: false
+        default: ""
         type: string
-        default: ''
 
 permissions:
   contents: write
@@ -45,47 +44,53 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      - name: 📂 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🔧 Install Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y p7zip-full curl
 
-      - name: 📥 Download File
+      - name: Download File
         id: download
+        shell: bash
         run: |
           mkdir -p temp_dl
-          FILENAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d'?' -f1 | sed 's/[^a-zA-Z0-9._\-\(\) ]/_/g')
+
+          FILE_URL="${{ github.event.inputs.file_url }}"
+
+          FILENAME=$(basename "$FILE_URL" | cut -d'?' -f1)
+          FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._() -]/_/g')
+
           echo "Downloading: $FILENAME"
-          curl -L --fail --retry 3 --progress-bar \
-               -o "temp_dl/$FILENAME" \
-               "${{ github.event.inputs.file_url }}"
 
-          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-          echo "filepath=temp_dl/$FILENAME" >> $GITHUB_OUTPUT
+          curl -L --fail --retry 3 \
+            -o "temp_dl/$FILENAME" \
+            "$FILE_URL"
 
-      - name: ✂️ Create Split Archive
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "filepath=temp_dl/$FILENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create Split Archive
         id: archive
+        shell: bash
         run: |
           FILEPATH="${{ steps.download.outputs.filepath }}"
           PASS="${{ github.event.inputs.zip_password }}"
-          THRESH_MB=${{ github.event.inputs.max_part_mb }}
+          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
 
-          if [[ "$THRESH_MB" -le 0 ]] || [[ "$THRESH_MB" -gt 1900 ]]; then
+          if [[ -z "$THRESH_MB" || "$THRESH_MB" -le 0 || "$THRESH_MB" -gt 1900 ]]; then
             THRESH_MB=1800
           fi
 
           BASENAME=$(basename "$FILEPATH")
 
-          cd temp_dl
+          cd temp_dl || exit 1
 
           ARCHIVE_BASE="${BASENAME%.*}_$(date +%Y%m%d_%H%M%S)"
-
-          echo "Creating archive (~${THRESH_MB}MB parts)..."
 
           if [ -n "$PASS" ]; then
             7z a -p"$PASS" -mhe=on -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$BASENAME"
@@ -93,21 +98,23 @@ jobs:
             7z a -mx=3 -v${THRESH_MB}m "${ARCHIVE_BASE}.7z" "$BASENAME"
           fi
 
-          # Rename if single part
           if [ -f "${ARCHIVE_BASE}.7z.001" ] && [ ! -f "${ARCHIVE_BASE}.7z.002" ]; then
             mv "${ARCHIVE_BASE}.7z.001" "${ARCHIVE_BASE}.7z"
           fi
 
-          echo "archive_name=${ARCHIVE_BASE}.7z" >> $GITHUB_OUTPUT
+          echo "archive_name=${ARCHIVE_BASE}.7z" >> "$GITHUB_OUTPUT"
 
           cd ..
 
-      - name: 📅 Get Current Date
+      - name: Get Current Date
         id: get_date
-        run: echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+        shell: bash
+        run: |
+          echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
 
-      - name: 📤 Push to Repository
-        if: github.event.inputs.upload_method == 'repository (push to repo)'
+      - name: Push to Repository
+        if: github.event.inputs.upload_method == 'repository'
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -117,34 +124,29 @@ jobs:
           mv temp_dl/* downloads/ 2>/dev/null || true
 
           git add downloads/
-          git commit -m "⬇️ Direct Download: ${{ steps.download.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+
+          git commit -m "Direct Download: ${{ steps.download.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+
           git push
 
-      - name: 📤 Upload to GitHub Releases
-        if: github.event.inputs.upload_method == 'release (GitHub Releases)'
+      - name: Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || format('direct-{0}', github.run_number) }}
-          name: ${{ format('Direct Download - {0}', steps.download.outputs.filename) }}
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('direct-{0}', github.run_number) }}
+          name: Direct Download Release
           body: |
-            **📦 Direct File Download**
+            Direct download completed.
 
-            **File Name:** ${{ steps.download.outputs.filename }}
+            File: ${{ steps.download.outputs.filename }}
+            Date: ${{ steps.get_date.outputs.date }}
+          files: temp_dl/*
 
-            **Original URL:** ${{ github.event.inputs.file_url }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            **Downloaded on:** ${{ steps.get_date.outputs.date }}
-            **Archive Type:** 7z (Split)
-
-            ---
-            Powered by Meli-Action ⚡
-          files: |
-            temp_dl/*
-          token: ${{ secrets.GITHUB_TOKEN }}
-          draft: false
-          prerelease: false
-
-      - name: 🧹 Cleanup
+      - name: Cleanup
         if: always()
-        run: rm -rf temp_dl 2>/dev/null || true
-```
+        shell: bash
+        run: |
+          rm -rf temp_dl
